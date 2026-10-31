@@ -10,6 +10,11 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(items.len());
+    let threads = if cfg!(target_os = "android") {
+        threads.min(2)
+    } else {
+        threads
+    };
     if threads <= 1 {
         return items.iter().map(f).collect();
     }

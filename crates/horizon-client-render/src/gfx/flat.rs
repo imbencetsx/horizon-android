@@ -127,7 +127,12 @@ pub fn wanted(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
         _ => {}
     }
     let info = adapter.get_info();
-    (info.backend == wgpu::Backend::Metal || is_broken_intel_vulkan(&info))
+    // GLES also lacks native multi-draw. Use the existing ordered index-list
+    // batching on Android when vertex storage and compute really are supported.
+    let mobile_gles = cfg!(target_os = "android")
+        && info.backend == wgpu::Backend::Gl
+        && option_env!("HORIZON_ANDROID_SECTION_BATCHING") != Some("0");
+    (mobile_gles || info.backend == wgpu::Backend::Metal || is_broken_intel_vulkan(&info))
         && supported(adapter, device)
 }
 

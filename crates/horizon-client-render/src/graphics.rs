@@ -613,6 +613,11 @@ impl Graphics {
             .map_or(2, |n| n.get())
             .saturating_sub(1)
             .max(1);
+        let auto = if cfg!(target_os = "android") {
+            auto.div_ceil(2).min(2)
+        } else {
+            auto
+        };
         if self.battery { auto.div_ceil(2) } else { auto }
     }
     /// The frame cap battery mode adds: 60 in a world, 30 in menus without a

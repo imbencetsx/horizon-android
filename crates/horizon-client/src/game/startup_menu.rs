@@ -518,6 +518,33 @@ impl Loading {
         event_loop: &ActiveEventLoop,
         event: WindowEvent,
     ) -> Result<()> {
+        if let WindowEvent::Touch(touch) = &event {
+            let pointer = WindowEvent::CursorMoved {
+                device_id: DeviceId::dummy(),
+                position: touch.location,
+            };
+            self.menu_event(event_loop, pointer)?;
+            match touch.phase {
+                winit::event::TouchPhase::Started
+                | winit::event::TouchPhase::Ended
+                | winit::event::TouchPhase::Cancelled => {
+                    self.menu_event(
+                        event_loop,
+                        WindowEvent::MouseInput {
+                            device_id: DeviceId::dummy(),
+                            button: MouseButton::Left,
+                            state: if touch.phase == winit::event::TouchPhase::Started {
+                                ElementState::Pressed
+                            } else {
+                                ElementState::Released
+                            },
+                        },
+                    )?;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {

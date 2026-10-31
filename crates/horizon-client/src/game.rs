@@ -260,6 +260,7 @@ mod text_displays;
 mod titles;
 mod tnt;
 mod totem;
+mod touch;
 mod trading;
 mod transient_blocks;
 mod trial_spawner;
@@ -441,7 +442,7 @@ impl Options {
     /// The command line, then what it asks of the process: the game folder, the account.
     /// A bad command line is a [`launch_api::UsageError`] (exit code 2, no crash report).
     fn read() -> Result<Option<Self>> {
-        let Some(mut o) = Self::parse(std::env::args().skip(1))
+        let Some(mut o) = Self::parse(launch_arguments().into_iter())
             .map_err(|e| launch_api::UsageError(e.to_string()))?
         else {
             return Ok(None);
@@ -1790,6 +1791,7 @@ fn follow_keymap(event: &mut WindowEvent) {
     {
         let code = match named {
             NamedKey::Escape => KeyCode::Escape,
+            NamedKey::BrowserBack if cfg!(target_os = "android") => KeyCode::Escape,
             NamedKey::CapsLock => KeyCode::CapsLock,
             _ => return,
         };
@@ -1918,6 +1920,8 @@ struct Game<'a> {
     mode: horizon_client::command::args::GameMode,
     keys: HashSet<KeyCode>,
     // Physical input is separate from remapped and toggled movement keys.
+    touch: horizon_client_input::touch::TouchControls,
+    touch_right: bool,
     physical_keys: HashSet<KeyCode>,
     physical_buttons: HashSet<MouseButton>,
     /// Control + left click as a right click (macOS).
@@ -6738,6 +6742,17 @@ impl Game<'_> {
             return;
         }
         self.was_playing = playing;
+        // Death, a server prompt or any screen transition can happen without
+        // a touch event. Forget finger ownership and movement at that boundary.
+        for output in self.touch.cancel() {
+            if let horizon_client_input::touch::Output::Action(action, false) = output
+                && let Some(key) = horizon_client::keybinds::key_code(
+                    horizon_client::keybinds::KeyBinds::default_of(action),
+                )
+            {
+                self.keys.remove(&key);
+            }
+        }
         let options = [
             self.settings.toggle_crouch,
             self.settings.toggle_sprint,
@@ -6913,7 +6928,7 @@ impl Game<'_> {
         };
         let scale = HudBatch::new(size).scale;
         let was_grabbed = self.captured;
-        if self.options.offscreen {
+        if self.options.offscreen || cfg!(target_os = "android") {
             // `--offscreen` shows no window: the system pointer stays where the
             // person at the computer has it, and the grab is the game's own (an
             // agent turns the view with `mouse-move`).
@@ -13635,6 +13650,7 @@ impl Game<'_> {
         // Map textures and font glyphs changed while building this frame's
         // geometry (game/maps.rs, world text) upload with this batch; draining
         // map_patches any earlier leaves them a frame behind.
+        self.draw_touch(&mut hud);
         hud.patches.append(&mut self.map_patches);
         let entity_spans = std::mem::take(self.entity_spans.get_mut());
         let glowing = std::mem::take(self.glowing_vertices.get_mut());
@@ -14417,7 +14433,39 @@ impl Game<'_> {
     }
 }
 impl ApplicationHandler for Game<'_> {
+    #[cfg(target_os = "android")]
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        let outputs = self.touch.cancel();
+        if let Err(error) = self.touch_outputs(event_loop, outputs) {
+            log::warn!("Touch release: {error}");
+        }
+        if self.touch_playing() {
+            let _ = self.pad_back();
+        }
+        self.keys.clear();
+        self.physical_keys.clear();
+        self.physical_buttons.clear();
+        self.left = false;
+        self.right = false;
+        self.capture(false);
+        crate::android::SUSPENDED.store(true, Ordering::Relaxed);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.suspend_surface();
+        }
+        event_loop.set_control_flow(ControlFlow::Wait);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        {
+            crate::android::SUSPENDED.store(false, Ordering::Relaxed);
+            if let Some(renderer) = &mut self.renderer
+                && let Err(error) = renderer.recreate_surface()
+            {
+                self.error = Some(error);
+                event_loop.exit();
+            }
+        }
         if self.window.is_some() {
             return;
         }
@@ -14466,7 +14514,18 @@ impl ApplicationHandler for Game<'_> {
         self.previous = Instant::now();
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, mut event: WindowEvent) {
+        #[cfg(target_os = "android")]
+        if crate::android::SUSPENDED.load(Ordering::Relaxed) {
+            return;
+        }
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
+            return;
+        }
+        if let WindowEvent::Touch(touch) = &event {
+            if let Err(error) = self.touch_event(event_loop, *touch) {
+                self.error = Some(error);
+                event_loop.exit();
+            }
             return;
         }
         follow_keymap(&mut event);
@@ -14499,6 +14558,11 @@ impl ApplicationHandler for Game<'_> {
             }
         }
         if let WindowEvent::Focused(false) = &event {
+            let outputs = self.touch.cancel();
+            if let Err(error) = self.touch_outputs(event_loop, outputs) {
+                self.error = Some(error);
+                event_loop.exit();
+            }
             self.physical_keys.clear();
             self.physical_buttons.clear();
         }
@@ -15551,6 +15615,12 @@ impl ApplicationHandler for Game<'_> {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        if crate::android::SUSPENDED.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
         if horizon_threads::stop_requests() > 0
             && self.pending_save.as_ref().is_none_or(|save| !save.quit)
         {
@@ -15597,6 +15667,11 @@ impl ApplicationHandler for Game<'_> {
         self.poll_control(event_loop);
         if self.pending_save.is_some() {
             return;
+        }
+        // A steady joystick/mining hold need not generate Android move events.
+        // Count it as input, just as a held controller stick is counted below.
+        if self.touch.has_contacts() {
+            self.last_input = Instant::now();
         }
         self.poll_pads(event_loop);
         self.pause_if_inactive();
@@ -15758,6 +15833,8 @@ impl<'a> Game<'a> {
                 horizon_client::command::args::GameMode::Survival
             },
             keys: HashSet::new(),
+            touch: Default::default(),
+            touch_right: false,
             physical_keys: HashSet::new(),
             physical_buttons: HashSet::new(),
             right_click_emulation: Default::default(),
@@ -17374,7 +17451,7 @@ fn leave_fullscreen_after(
 }
 
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
-    let result = EventLoop::new()?.run_app(&mut game);
+    let result = new_event_loop()?.run_app(&mut game);
     leave_fullscreen_after(&result, &mut game.settings);
     result?;
     horizon_client::discord_presence::stop();
@@ -17409,6 +17486,16 @@ struct Loading {
 }
 impl Loading {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        {
+            crate::android::SUSPENDED.store(false, Ordering::Relaxed);
+            if let Some(renderer) = &mut self.renderer
+                && let Err(error) = renderer.recreate_surface()
+            {
+                self.error = Some(error);
+                event_loop.exit();
+            }
+        }
         if self.window.is_some() {
             return;
         }
@@ -17463,6 +17550,10 @@ impl Loading {
         self.window = Some(window);
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, mut event: WindowEvent) {
+        #[cfg(target_os = "android")]
+        if crate::android::SUSPENDED.load(Ordering::Relaxed) {
+            return;
+        }
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
             return;
         }
@@ -17505,6 +17596,12 @@ impl Loading {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        if crate::android::SUSPENDED.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
         // The loop may run once more after exit(): keep the first error, the
         // one that ended loading.
         if self.error.is_some() {
@@ -17643,6 +17740,20 @@ enum App {
     Ready(Box<Game<'static>>),
 }
 impl ApplicationHandler for App {
+    #[cfg(target_os = "android")]
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        match self {
+            App::Ready(game) => game.suspended(event_loop),
+            App::Loading(loading) => {
+                crate::android::SUSPENDED.store(true, Ordering::Relaxed);
+                if let Some(renderer) = &mut loading.renderer {
+                    renderer.suspend_surface();
+                }
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         match self {
             App::Loading(loading) => loading.resumed(event_loop),
@@ -17661,6 +17772,12 @@ impl ApplicationHandler for App {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        if crate::android::SUSPENDED.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
         enum Step {
             Waiting,
             Ready(Box<Game<'static>>),
@@ -17764,7 +17881,7 @@ fn run_loading(
         error: None,
     };
     let mut app = App::Loading(Box::new(loading));
-    let result = EventLoop::new()?.run_app(&mut app);
+    let result = new_event_loop()?.run_app(&mut app);
     match &mut app {
         App::Ready(game) => leave_fullscreen_after(&result, &mut game.settings),
         App::Loading(loading) => leave_fullscreen_after(&result, &mut loading.settings),
@@ -17787,6 +17904,7 @@ fn run_loading(
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 pub use launch_api::{UsageError, exit_code};
 
 pub fn run() -> Result<()> {
@@ -18460,5 +18578,30 @@ mod tests {
             ModifiersState::empty(),
             &HashSet::new()
         ));
+    }
+}
+
+fn launch_arguments() -> Vec<String> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::arguments()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        std::env::args().skip(1).collect()
+    }
+}
+
+fn new_event_loop() -> std::result::Result<EventLoop<()>, EventLoopError> {
+    #[cfg(target_os = "android")]
+    {
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+        EventLoop::builder()
+            .with_android_app(crate::android::app())
+            .build()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        EventLoop::new()
     }
 }
