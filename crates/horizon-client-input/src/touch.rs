@@ -15,24 +15,15 @@ pub fn buttons(size: [f32; 2], density: f32) -> Vec<Button> {
     let d = density.max(1.0);
     let [w, h] = size.map(|v| v / d);
     let mut out = Vec::new();
-    for (i, (label, action)) in [
-        ("Jump", "key.jump"),
-        ("Use", "key.use"),
-        ("Mine", "key.attack"),
-        ("Sneak", "key.sneak"),
-        ("Run", "key.sprint"),
-        ("Pick", "key.pickItem"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let x = w - 12.0 - (3 - i % 3) as f32 * 56.0;
-        let y = h - 12.0 - (2 - i / 3) as f32 * 52.0;
-        out.push(Button {
-            label,
-            action,
-            rect: [x * d, y * d, 52.0 * d, 48.0 * d],
-        });
+    for (label, action, x, y, side) in [
+        ("Jump", "key.jump", w - 76.0, h - 128.0, 60.0),
+        ("Sneak", "key.sneak", w - 142.0, h - 64.0, 48.0),
+        ("Run", "key.sprint", w - 82.0, h - 64.0, 48.0),
+        ("Use", "key.use", w - 146.0, h - 154.0, 52.0),
+        ("Mine", "key.attack", w - 82.0, h - 198.0, 56.0),
+        ("Pick", "key.pickItem", w - 142.0, h - 214.0, 44.0),
+    ] {
+        out.push(Button { label, action, rect: [x * d, y * d, side * d, side * d] });
     }
     for (i, (label, action)) in [
         ("Pause", "back"),
@@ -86,12 +77,15 @@ pub enum Output {
     Look(f64, f64),
     Pointer([f32; 2]),
     Click(bool),
+    Hotbar(usize),
+    Tap,
 }
 #[derive(Clone, Copy, Debug)]
 enum Owner {
     Move([f32; 2]),
-    Look([f32; 2]),
+    Look { previous: [f32; 2], origin: [f32; 2], dragged: bool },
     Button(&'static str),
+    Hotbar,
     Menu,
 }
 #[derive(Default, Debug)]
@@ -120,10 +114,25 @@ impl TouchControls {
         density: f32,
         playing: bool,
     ) -> Vec<Output> {
+        self.start_with_gui_scale(id, p, size, density, density, playing)
+    }
+    pub fn start_with_gui_scale(
+        &mut self,
+        id: u64,
+        p: [f32; 2],
+        size: [f32; 2],
+        density: f32,
+        gui_scale: f32,
+        playing: bool,
+    ) -> Vec<Output> {
         if self.fingers.contains_key(&id) || (!playing && !self.fingers.is_empty()) {
             return Vec::new();
         }
         let mut out = Vec::new();
+        if playing && let Some(slot) = hotbar_slot(p, size, gui_scale) {
+            self.fingers.insert(id, Owner::Hotbar);
+            return vec![Output::Hotbar(slot)];
+        }
         let button = if playing {
             buttons(size, density)
         } else {
@@ -152,10 +161,10 @@ impl TouchControls {
             }
             Owner::Move(p)
         } else {
-            if self.fingers.values().any(|o| matches!(o, Owner::Look(_))) {
+            if self.fingers.values().any(|o| matches!(o, Owner::Look { .. })) {
                 return out;
             }
-            Owner::Look(p)
+            Owner::Look { previous: p, origin: p, dragged: false }
         };
         self.fingers.insert(id, owner);
         out
@@ -165,14 +174,21 @@ impl TouchControls {
             return Vec::new();
         };
         match owner {
-            Owner::Look(previous) => {
+            Owner::Look { previous, origin, dragged } => {
                 let d = density.max(1.0);
-                let out = Output::Look(
-                    f64::from((p[0] - previous[0]) / d),
-                    f64::from((p[1] - previous[1]) / d),
-                );
+                if (p[0] - origin[0]).abs().max((p[1] - origin[1]).abs()) > d * 8.0 {
+                    *dragged = true;
+                }
+                let out = if *dragged {
+                    Some(Output::Look(
+                        f64::from((p[0] - previous[0]) / d),
+                        f64::from((p[1] - previous[1]) / d),
+                    ))
+                } else {
+                    None
+                };
                 *previous = p;
-                vec![out]
+                out.into_iter().collect()
             }
             Owner::Move(origin) => {
                 let dead = 12.0 * density.max(1.0);
@@ -187,11 +203,13 @@ impl TouchControls {
                 out
             }
             Owner::Menu => vec![Output::Pointer(p)],
-            Owner::Button(_) => Vec::new(),
+            Owner::Button(_) | Owner::Hotbar => Vec::new(),
         }
     }
     pub fn end(&mut self, id: u64) -> Vec<Output> {
         match self.fingers.remove(&id) {
+            Some(Owner::Look { dragged: false, .. }) => vec![Output::Tap],
+            Some(Owner::Look { dragged: true, .. }) => Vec::new(),
             Some(Owner::Move(_)) => {
                 let out = (0..4)
                     .filter(|&i| self.movement[i])
@@ -205,10 +223,34 @@ impl TouchControls {
             _ => Vec::new(),
         }
     }
+    pub fn cancel_finger(&mut self, id: u64) -> Vec<Output> {
+        self.end(id)
+            .into_iter()
+            .filter(|output| !matches!(output, Output::Tap))
+            .collect()
+    }
     pub fn cancel(&mut self) -> Vec<Output> {
         let ids: Vec<_> = self.fingers.keys().copied().collect();
-        ids.into_iter().flat_map(|id| self.end(id)).collect()
+        ids.into_iter()
+            .flat_map(|id| self.end(id))
+            .filter(|output| !matches!(output, Output::Tap))
+            .collect()
     }
+}
+
+/// Match the vanilla HUD's nine-slot bar so its visible slots are directly clickable.
+pub fn hotbar_slot(point: [f32; 2], size: [f32; 2], gui: f32) -> Option<usize> {
+    let gui = gui.max(1.0);
+    let [w, h] = size.map(|v| (v / gui).ceil());
+    let left = (w as i32 / 2 - 91) as f32;
+    let top = h - 22.0;
+    if point[1] / gui < top - 8.0 || point[1] / gui >= h {
+        return None;
+    }
+    let x = point[0] / gui - left;
+    (0.0..182.0)
+        .contains(&x)
+        .then_some(((x / 20.0).floor() as usize).min(8))
 }
 
 #[cfg(test)]

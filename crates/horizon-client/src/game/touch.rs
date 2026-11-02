@@ -20,16 +20,19 @@ impl Game<'_> {
         let density = window.scale_factor() as f32;
         let point = [event.location.x as f32, event.location.y as f32];
         let playing = self.touch_playing();
+        let gui_scale = HudBatch::new([size.width, size.height]).scale;
         let outputs = match event.phase {
-            TouchPhase::Started => self.touch.start(
+            TouchPhase::Started => self.touch.start_with_gui_scale(
                 event.id,
                 point,
                 [size.width as f32, size.height as f32],
                 density,
+                gui_scale,
                 playing,
             ),
             TouchPhase::Moved => self.touch.moved(event.id, point, density),
-            TouchPhase::Ended | TouchPhase::Cancelled => self.touch.end(event.id),
+            TouchPhase::Ended => self.touch.end(event.id),
+            TouchPhase::Cancelled => self.touch.cancel_finger(event.id),
         };
         self.last_input = Instant::now();
         self.touch_outputs(event_loop, outputs)?;
@@ -48,6 +51,32 @@ impl Game<'_> {
             match output {
                 Output::Action("back", true) => self.pad_back()?,
                 Output::Action("back", false) => {}
+                Output::Hotbar(slot) => {
+                    let key = match slot {
+                        0 => KeyCode::Digit1,
+                        1 => KeyCode::Digit2,
+                        2 => KeyCode::Digit3,
+                        3 => KeyCode::Digit4,
+                        4 => KeyCode::Digit5,
+                        5 => KeyCode::Digit6,
+                        6 => KeyCode::Digit7,
+                        7 => KeyCode::Digit8,
+                        8 => KeyCode::Digit9,
+                        _ => continue,
+                    };
+                    self.key_pressed(key)?;
+                }
+                Output::Tap => {
+                    // A held block item uses the aimed-at block; other short
+                    // taps swing at the current target. Mine is held separately.
+                    let button = if self.pick().is_some() || self.held().is_some() {
+                        MouseButton::Right
+                    } else {
+                        MouseButton::Left
+                    };
+                    self.play_mouse(button, true)?;
+                    self.play_mouse(button, false)?;
+                }
                 Output::Action("touch.right", down) => {
                     if down {
                         self.touch_right = !self.touch_right;
