@@ -12,3 +12,5 @@ pub mod keybinds;
 pub mod keymapping;
 pub mod mouse;
 pub mod window;
+
+pub mod touch;

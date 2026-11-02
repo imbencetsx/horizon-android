@@ -690,10 +690,15 @@ pub struct Renderer {
 }
 /// Every layer's mip levels, layer major (`first` is the first layer's
 /// index into `settings`), made by `MipmapGenerator`.
-/// Block sprite layers per texture array: the smallest
-/// `max_texture_array_layers` of the GPUs Horizon runs on. Mods add sprites
-/// past it into more arrays (terrain.wgsl's `sprite`).
-pub(crate) const SPRITE_SPLIT: u32 = 2048;
+/// Block sprite layers per texture array. Android uses the GLES minimum:
+/// Mali-G72 exposes 256 layers, below vanilla's sprite count. The resource
+/// worker, GPU uploads and shader constants must all use this same split.
+/// Further sprites go into more arrays (terrain.wgsl's `sprite`).
+pub(crate) const SPRITE_SPLIT: u32 = if cfg!(target_os = "android") {
+    256
+} else {
+    2048
+};
 /// [`SPRITE_SPLIT`], or a smaller split from `HORIZON_SPRITE_SPLIT` (dev
 /// only: vanilla's sprites drawn from several arrays must look the same).
 fn sprite_split() -> u32 {
@@ -2696,6 +2701,7 @@ impl Renderer {
             })];
             let info = adapter.get_info();
             let min_sections = if flat::is_broken_intel_vulkan(&info)
+                || (cfg!(target_os = "android") && info.backend == wgpu::Backend::Gl)
                 || std::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1")
             {
                 0
@@ -3010,6 +3016,16 @@ impl Renderer {
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = self.surface.take();
     }
+    /// Android requires every native surface reference to be dropped before
+    /// the suspended callback returns. Keep the device and world GPU buffers.
+    pub fn suspend_surface(&mut self) {
+        self.suspended = true;
+        self.surface = None;
+        *self
+            .spare_surface
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
     /// Reattach a window after surface loss or a failed renderer replacement.
     pub fn recreate_surface(&mut self) -> Result<()> {
         if self.offscreen.is_some() {
@@ -3035,6 +3051,7 @@ impl Renderer {
             self.hdr.as_ref(),
         );
         self.surface = Some(surface);
+        self.suspended = false;
         Ok(())
     }
     /// The world's depth, which occlusion culling's test and post effects may read.
@@ -6955,6 +6972,30 @@ mod sprite_upload_tests {
             assert_eq!(&actual[32 * 32 * 4..], expected, "rail layer {layer}");
         }
     }
+    #[test]
+    fn mobile_sprite_arrays_preserve_layers_across_all_six_arrays() {
+        let layers = 1291u32;
+        let split = 256;
+        // Opaque, unique colors: transparent pixels are intentionally
+        // solidified by the cutout mip generator before upload.
+        let pixels: Vec<u8> = (0..layers)
+            .flat_map(|i| [i as u8, (i >> 8) as u8, (i >> 16) as u8, 255])
+            .collect();
+        let prepared = PreparedTextures::with_split(&pixels, 1, layers, &[], (&[255; 4], 1), split);
+        let counts: Vec<_> = prepared
+            .sprites
+            .iter()
+            .map(|(bytes, _)| bytes.len() / 4)
+            .collect();
+        assert_eq!(counts, vec![256, 256, 256, 256, 256, 11]);
+        let uploaded: Vec<_> = prepared
+            .sprites
+            .iter()
+            .flat_map(|(bytes, _)| bytes.iter().copied())
+            .collect();
+        assert_eq!(uploaded, pixels);
+    }
+
     #[test]
     fn prepared_texture_uploads_preserve_layer_order_and_settings() {
         let size = 4;

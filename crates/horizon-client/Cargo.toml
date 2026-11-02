@@ -7,6 +7,13 @@ license.workspace = true
 rust-version = "1.90"
 description = "Horizon native development client"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30.13", features = ["android-native-activity"] }
+android_logger = "0.15"
+
 [dependencies]
 horizon-assets = { path = "../horizon-assets" }
 horizon-client-core = { path = "../horizon-client-core" }
@@ -115,3 +122,25 @@ horizon-client-render = { path = "../horizon-client-render", features = ["test-s
 horizon-items = { path = "../horizon-items", features = ["test-support"] }
 # Every WGSL shader translated as wgpu's DirectX 12 backend does (gfx.rs tests).
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }
+
+[package.metadata.android]
+package = "dev.playhorizon.android"
+apk_name = "horizon-android"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 28
+target_sdk_version = 36
+
+[package.metadata.android.application]
+label = "Horizon"
+
+[package.metadata.android.application.activity]
+orientation = "sensorLandscape"
+config_changes = "orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|density"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"

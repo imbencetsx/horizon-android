@@ -17,6 +17,7 @@ struct Out {
     // projection_from_position(gl_Position): the End portal's texProj0.
     @location(2) proj: vec4<f32>,
     @location(3) glint_uv: vec2<f32>,
+    @location(4) @interpolate(flat) glint_alpha: f32,
 }
 @vertex fn vs_main(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>, @location(2) color: vec4<f32>, @location(3) depth: f32, @location(4) glint_uv: vec2<f32>) -> Out {
     let pixels = pos * hud.size.z;
@@ -26,6 +27,7 @@ struct Out {
     out.color = color;
     out.proj = vec4(out.clip.xy * 0.5 + 0.5, out.clip.zw);
     out.glint_uv = glint_uv;
+    out.glint_alpha = hud.size.w;
     return out;
 }
 @fragment fn fs_main(in: Out) -> @location(0) vec4<f32> {
@@ -34,7 +36,7 @@ struct Out {
     if in.uv.x >= 2.0 {
         let mask = textureSample(atlas, atlas_sampler, in.uv - vec2(2.0, 0.0)).a;
         if mask < 0.1 { discard; }
-        let glint = hud.size.w * textureSample(glint_tex, glint_sampler, in.glint_uv);
+        let glint = in.glint_alpha * textureSample(glint_tex, glint_sampler, in.glint_uv);
         return vec4(glint.rgb * glint.rgb, mask);
     }
     let c = textureSample(atlas, atlas_sampler, in.uv) * in.color;

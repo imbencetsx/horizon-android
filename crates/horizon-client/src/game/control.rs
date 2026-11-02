@@ -110,7 +110,11 @@ impl Game<'_> {
     pub(super) fn poll_control(&mut self, event_loop: &ActiveEventLoop) {
         if let Some((deadline, reply)) = self.pending_bench.take() {
             if Instant::now() >= deadline {
-                let _ = reply.send(self.frame_stats.summary().to_string());
+                let mut summary = self.frame_stats.summary();
+                // Effective cap at completion: distinguishes AFK throttling
+                // from a rendering bottleneck during unattended profiling.
+                summary["effective_fps_limit"] = self.framerate_limit().into();
+                let _ = reply.send(summary.to_string());
             } else {
                 self.pending_bench = Some((deadline, reply));
             }
@@ -712,7 +716,8 @@ impl Game<'_> {
                 Ok(Some(json!({ "chat": lines })))
             }
             "stats" => {
-                let summary = self.frame_stats.summary();
+                let mut summary = self.frame_stats.summary();
+                summary["effective_fps_limit"] = self.framerate_limit().into();
                 if words.get(1) == Some(&"reset") {
                     self.frame_stats.reset();
                 }

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "rust-engineer": {
+      "source": "jeffallan/claude-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust-engineer/SKILL.md",
+      "computedHash": "525e52a1fa5c125489f2daab886c8210c06e18f557f7c25e08754ef2786e59e2"
+    },
+    "testing-setup": {
+      "source": "android/skills",
+      "sourceType": "github",
+      "skillPath": "testing/testing-setup/SKILL.md",
+      "computedHash": "d4746da1949ed59d282e6ff160324360e83b795c1b44fa393851ac138e43c901"
+    }
+  }
+}

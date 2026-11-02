@@ -35,7 +35,7 @@ pub(super) fn show(looked_in: &std::path::Path, settings: &Settings) -> Result<(
         error: None,
     };
     horizon_client::hud::GUI_SCALE.store(settings.gui_scale, Ordering::Relaxed);
-    EventLoop::new()?.run_app(&mut app)?;
+    new_event_loop()?.run_app(&mut app)?;
     app.error.map_or(Ok(()), Err)
 }
 
@@ -92,7 +92,25 @@ impl Missing {
 }
 
 impl ApplicationHandler for Missing {
+    #[cfg(target_os = "android")]
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        crate::android::SUSPENDED.store(true, Ordering::Relaxed);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.suspend_surface();
+        }
+        event_loop.set_control_flow(ControlFlow::Wait);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        crate::android::SUSPENDED.store(false, Ordering::Relaxed);
+        #[cfg(target_os = "android")]
+        if let Some(renderer) = &mut self.renderer
+            && let Err(error) = renderer.recreate_surface()
+        {
+            self.error = Some(error);
+            event_loop.exit();
+        }
         if self.window.is_some() {
             return;
         }
@@ -123,10 +141,21 @@ impl ApplicationHandler for Missing {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        #[cfg(target_os = "android")]
+        if crate::android::SUSPENDED.load(Ordering::Relaxed) {
+            return;
+        }
         let Some(window) = self.window.clone().filter(|w| w.id() == id) else {
             return;
         };
         match event {
+            WindowEvent::Touch(touch) => {
+                self.pointer = (touch.location.x, touch.location.y);
+                if touch.phase == winit::event::TouchPhase::Ended {
+                    self.click(event_loop);
+                }
+                window.request_redraw();
+            }
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
@@ -146,7 +175,12 @@ impl ApplicationHandler for Missing {
             } => self.click(event_loop),
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
-                    && event.physical_key == PhysicalKey::Code(KeyCode::Escape) =>
+                    && (event.physical_key == PhysicalKey::Code(KeyCode::Escape)
+                        || (cfg!(target_os = "android")
+                            && event.logical_key
+                                == winit::keyboard::Key::Named(
+                                    winit::keyboard::NamedKey::BrowserBack,
+                                ))) =>
             {
                 event_loop.exit()
             }
@@ -155,6 +189,11 @@ impl ApplicationHandler for Missing {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        if crate::android::SUSPENDED.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         if horizon_threads::stop_requests() > 0 {
             event_loop.exit();
             return;

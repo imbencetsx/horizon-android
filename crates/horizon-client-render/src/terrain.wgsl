@@ -36,7 +36,7 @@ struct Globals {
 @group(0) @binding(2) var sprite_sampler: sampler;
 @group(0) @binding(3) var lightmap: texture_2d<f32>;
 @group(0) @binding(4) var lightmap_sampler: sampler;
-// Layers past the first array's SPRITE_SPLIT (2048, gfx.rs): mods' sprites.
+// Layers past the first array's SPRITE_SPLIT (a gfx.rs pipeline constant).
 @group(0) @binding(5) var sprites_1: texture_2d_array<f32>;
 @group(0) @binding(6) var sprites_2: texture_2d_array<f32>;
 @group(0) @binding(7) var sprites_3: texture_2d_array<f32>;
@@ -44,8 +44,8 @@ struct Globals {
 @group(0) @binding(9) var sprites_5: texture_2d_array<f32>;
 @group(0) @binding(10) var sprites_6: texture_2d_array<f32>;
 @group(0) @binding(11) var sprites_7: texture_2d_array<f32>;
-// How many sprite arrays hold layers (a pipeline constant): 1 for vanilla,
-// which then samples exactly as before.
+// How many sprite arrays hold layers (a pipeline constant). Vanilla needs
+// several arrays on Android's 256-layer GPUs; desktop normally needs one.
 override SPRITE_ARRAYS: u32 = 1u;
 override SPRITE_SPLIT: u32 = 2048u;
 // A sprite sampled with the given gradients, from whichever array holds its layer.
